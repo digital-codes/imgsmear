@@ -9,7 +9,7 @@ const props = defineProps({
   mode: { type: String, default: 'cpu' as RenderMode },
   fwd: { type: Boolean, default: true },
   tgl: { type: Boolean, default: true },
-  delayMs: { type: Number, default: 20 },
+  delayMs: { type: Number, default: 30 },
   // Width of the smear band per tick, in native image pixels. Default is
   // 1/120 of the image width, computed in onMounted. Override with an
   // explicit value if you want a fixed band size.
@@ -240,7 +240,10 @@ const shaderRender = (time: number): void => {
 
   const elapsed = time - shaderState.lastTickTime
   if (elapsed >= props.delayMs) {
-    advanceIndex(shaderState, stepColumnsResolved)
+    const wrapped = advanceIndex(shaderState, stepColumnsResolved)
+    if (wrapped && directionToggle.value) {
+      direction.value = !direction.value
+    }
     shaderState.gl.uniform1f(shaderState.indexColumnLoc, shaderState.indexColumn)
     shaderState.gl.uniform1f(shaderState.directionLoc, directionUniformValue(direction.value))
     shaderState.lastTickTime = time
