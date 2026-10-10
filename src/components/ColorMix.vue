@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, withDefaults } from 'vue'
 
 const running = ref(false)
 
@@ -8,18 +8,22 @@ const glCtx = ref<WebGLRenderingContext | null>(null)
 let cleanupColorMix: (() => void) | null = null
 let animationFrameId: number | null = null
 
-const props = defineProps({
-  container: HTMLElement | undefined
-})
+const props = withDefaults(
+  defineProps<{
+    container?: HTMLElement
+  }>(),
+  {},
+)
 
 // Install Vite globally if not installed
 // npm create vite@latest my-webgl-project -- --template vanilla
 
 onMounted(() => {
-  console.log("Mounted, container: ",props.container)
-  colorMix(props.container);
-  running.value = true;
-});
+  if (!props.container) return
+  console.log("Mounted, container: ", props.container)
+  colorMix(props.container)
+  running.value = true
+})
 
 onUnmounted(() => {
     cleanupColorMix?.();
@@ -54,7 +58,8 @@ const colorMix = (el:HTMLElement) => {
     if (!gl) {
         return;
     }
-    glCtx.value = gl;
+    const readyGl = gl
+    glCtx.value = readyGl
 
     console.log('colorMix.js');
 
@@ -135,7 +140,7 @@ const colorMix = (el:HTMLElement) => {
         }
     };
 
-    function addDrop(x, y) {
+    function addDrop(x: number, y: number) {
         let normalizedX = x / canvas.width;
         let normalizedY = 1.0 - y / canvas.height;
 
@@ -157,7 +162,7 @@ const colorMix = (el:HTMLElement) => {
         dropIndex++;
     }
 
-    function eraseColorAt(x, y) {
+    function eraseColorAt(x: number, y: number) {
         for (let i = 0; i < maxDrops; i++) {
             let index = i * 2;
             let dropX = dropPositions[index];
@@ -204,8 +209,11 @@ const colorMix = (el:HTMLElement) => {
     }`;
 
     // Compile shader function
-    function createShader(gl, type, source) {
+    function createShader(gl: WebGLRenderingContext, type: number, source: string): WebGLShader | null {
         const shader = gl.createShader(type);
+        if (!shader) {
+            return null
+        }
         gl.shaderSource(shader, source);
         gl.compileShader(shader);
         if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
@@ -217,28 +225,37 @@ const colorMix = (el:HTMLElement) => {
     }
 
     // Create and link WebGL program
-    const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
-    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
-    const program = gl.createProgram();
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
-    gl.useProgram(program);
+    const vertexShader = createShader(readyGl, readyGl.VERTEX_SHADER, vertexShaderSource);
+    const fragmentShader = createShader(readyGl, readyGl.FRAGMENT_SHADER, fragmentShaderSource);
+    if (!vertexShader || !fragmentShader) {
+        return
+    }
+    const program = readyGl.createProgram();
+    if (!program) {
+        return
+    }
+    readyGl.attachShader(program, vertexShader);
+    readyGl.attachShader(program, fragmentShader);
+    readyGl.linkProgram(program);
+    readyGl.useProgram(program);
 
     // Define fullscreen quad
     const vertices = new Float32Array([
         -1, -1, 1, -1, -1, 1,
         -1, 1, 1, -1, 1, 1
     ]);
-    const vbo = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-    const position = gl.getAttribLocation(program, 'position');
-    gl.enableVertexAttribArray(position);
-    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+    const vbo = readyGl.createBuffer();
+    if (!vbo) {
+        return
+    }
+    readyGl.bindBuffer(readyGl.ARRAY_BUFFER, vbo);
+    readyGl.bufferData(readyGl.ARRAY_BUFFER, vertices, readyGl.STATIC_DRAW);
+    const position = readyGl.getAttribLocation(program, 'position');
+    readyGl.enableVertexAttribArray(position);
+    readyGl.vertexAttribPointer(position, 2, readyGl.FLOAT, false, 0, 0);
 
     // Render loop
-    function render(time) {
+    function render(time: number) {
         if (cleanupColorMix === null) {
             return;
         }
@@ -247,18 +264,27 @@ const colorMix = (el:HTMLElement) => {
             animationFrameId = requestAnimationFrame(render);
             return;
         }
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.uniform1f(gl.getUniformLocation(program, 'time'), time * 0.001);
-        gl.uniform1f(gl.getUniformLocation(program, 'diffusion'), diffusion);
-        gl.uniform1f(gl.getUniformLocation(program, 'dissolution'), dissolution);
-        gl.uniform1f(gl.getUniformLocation(program, 'gravity'), gravity);
+
+        const timeLoc = readyGl.getUniformLocation(program, 'time')
+        const diffusionLoc = readyGl.getUniformLocation(program, 'diffusion')
+        const dissolutionLoc = readyGl.getUniformLocation(program, 'dissolution')
+        const gravityLoc = readyGl.getUniformLocation(program, 'gravity')
+        const dropsLoc = readyGl.getUniformLocation(program, 'drops')
+        const colorsLoc = readyGl.getUniformLocation(program, 'colors')
+        const dropTimesLoc = readyGl.getUniformLocation(program, 'drop_times')
+
+        readyGl.clear(readyGl.COLOR_BUFFER_BIT);
+        if (timeLoc) readyGl.uniform1f(timeLoc, time * 0.001);
+        if (diffusionLoc) readyGl.uniform1f(diffusionLoc, diffusion);
+        if (dissolutionLoc) readyGl.uniform1f(dissolutionLoc, dissolution);
+        if (gravityLoc) readyGl.uniform1f(gravityLoc, gravity);
 
         // Update drop positions, colors, and times in shader
-        gl.uniform2fv(gl.getUniformLocation(program, 'drops'), dropPositions);
-        gl.uniform3fv(gl.getUniformLocation(program, 'colors'), dropColors);
-        gl.uniform1fv(gl.getUniformLocation(program, 'drop_times'), dropTimes);
+        if (dropsLoc) readyGl.uniform2fv(dropsLoc, dropPositions);
+        if (colorsLoc) readyGl.uniform3fv(colorsLoc, dropColors);
+        if (dropTimesLoc) readyGl.uniform1fv(dropTimesLoc, dropTimes);
 
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        readyGl.drawArrays(readyGl.TRIANGLES, 0, 6);
         animationFrameId = requestAnimationFrame(render);
     }
     animationFrameId = requestAnimationFrame(render);

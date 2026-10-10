@@ -1,20 +1,29 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick, withDefaults } from 'vue'
 
 type RenderMode = 'cpu' | 'shader'
 
-const props = defineProps({
-  container: HTMLElement | undefined,
-  img: String | undefined,
-  mode: { type: String, default: 'cpu' as RenderMode },
-  fwd: { type: Boolean, default: true },
-  tgl: { type: Boolean, default: true },
-  delayMs: { type: Number, default: 30 },
-  // Width of the smear band per tick, in native image pixels. Default is
-  // 1/120 of the image width, computed in onMounted. Override with an
-  // explicit value if you want a fixed band size.
-  stepColumns: { type: Number, default: 1 }  // normally 1, but 4 is faster for testing
-})
+const props = withDefaults(
+  defineProps<{
+    container?: HTMLElement
+    img?: string
+    mode?: RenderMode
+    fwd?: boolean
+    tgl?: boolean
+    delayMs?: number
+    // Width of the smear band per tick, in native image pixels. Default is
+    // 1/120 of the image width, computed in onMounted. Override with an
+    // explicit value if you want a fixed band size.
+    stepColumns?: number
+  }>(),
+  {
+    mode: 'cpu',
+    fwd: true,
+    tgl: true,
+    delayMs: 30,
+    stepColumns: 1,
+  },
+)
 
 const direction = ref(props.fwd)
 const directionToggle = ref(props.tgl)
