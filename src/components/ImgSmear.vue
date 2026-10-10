@@ -210,6 +210,9 @@ const cpuTick = (): void => {
   const wrapped = advanceIndex(cpuState, stepColumnsResolved)
   if (wrapped) {
     console.log("wrapping", cpuState, direction.value, directionToggle.value)
+    if (directionToggle.value) {
+      direction.value = !direction.value
+    }
     // Reset the working buffer from the pristine copy so the next cycle
     // starts from the original image again. Also push that reset to the
     // canvas on the same frame -- otherwise the all-one-color frame we
