@@ -13,7 +13,7 @@ const props = defineProps({
   // Width of the smear band per tick, in native image pixels. Default is
   // 1/120 of the image width, computed in onMounted. Override with an
   // explicit value if you want a fixed band size.
-  stepColumns: { type: Number, default: 4 }  // normally 1, but 4 is faster for testing
+  stepColumns: { type: Number, default: 1 }  // normally 1, but 4 is faster for testing
 })
 
 const direction = ref(props.fwd)
@@ -43,6 +43,7 @@ interface ShaderState {
   texture: WebGLTexture
   buffer: WebGLBuffer
   indexColumnLoc: WebGLUniformLocation | null
+  directionLoc: WebGLUniformLocation | null
   width: number
   height: number
   indexColumn: number
@@ -51,6 +52,11 @@ interface ShaderState {
   disposed: boolean
 }
 let shaderState: ShaderState | null = null
+
+function directionUniformValue(isForward: boolean): number {
+  // Shader treats values < 0.5 as forward.
+  return isForward ? 0 : 1
+}
 
 // ---------- Shaders ----------
 // Fullscreen quad covering clip space [-1, 1] x [-1, 1].
@@ -79,6 +85,7 @@ precision mediump float;
 uniform sampler2D u_image;
 uniform float u_indexColumn;
 uniform float u_width;
+uniform float u_direction;
 varying vec2 v_uv;
 
 void main() {
@@ -86,10 +93,20 @@ void main() {
   // This is deterministic across source types (including ImageBitmap).
   vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
   float px = uv.x * u_width;
-  if (px >= u_indexColumn) {
+  float u = (u_indexColumn + 0.5) / u_width;
+  bool shouldSmear = false;
+  
+  if (u_direction > 0.5) {
+    // Forward direction: smear from left to index column
+    shouldSmear = px < u_indexColumn;
+  } else {
+    // Backward direction: smear from index column to right
+    shouldSmear = px > u_indexColumn;
+  }
+  
+  if (shouldSmear) {
     // Sample the index column for this row. +0.5 lands on the pixel
     // centre when using nearest/linear filtering.
-    float u = (u_indexColumn + 0.5) / u_width;
     gl_FragColor = texture2D(u_image, vec2(u, uv.y));
   } else {
     gl_FragColor = texture2D(u_image, uv);
@@ -222,6 +239,7 @@ const shaderRender = (time: number): void => {
   if (elapsed >= props.delayMs) {
     advanceIndex(shaderState, stepColumnsResolved)
     shaderState.gl.uniform1f(shaderState.indexColumnLoc, shaderState.indexColumn)
+    shaderState.gl.uniform1f(shaderState.directionLoc, directionUniformValue(direction.value))
     shaderState.lastTickTime = time
     renderShaderFrame()
   }
@@ -295,11 +313,13 @@ function setupShader(canvas: HTMLCanvasElement, bitmap: ImageBitmap): boolean {
   const imageLoc = gl.getUniformLocation(program, 'u_image')
   const indexColumnLoc = gl.getUniformLocation(program, 'u_indexColumn')
   const widthLoc = gl.getUniformLocation(program, 'u_width')
-  if (!imageLoc || !indexColumnLoc || !widthLoc) return false
+  const directionLoc = gl.getUniformLocation(program, 'u_direction')
+  if (!imageLoc || !indexColumnLoc || !widthLoc || !directionLoc) return false
 
   gl.uniform1i(imageLoc, 0)
   gl.uniform1f(widthLoc, canvas.width)
   gl.uniform1f(indexColumnLoc, canvas.width - 1)
+  gl.uniform1f(directionLoc, directionUniformValue(direction.value))
 
   shaderState = {
     gl,
@@ -307,6 +327,7 @@ function setupShader(canvas: HTMLCanvasElement, bitmap: ImageBitmap): boolean {
     texture,
     buffer,
     indexColumnLoc,
+    directionLoc,
     width: canvas.width,
     height: canvas.height,
     indexColumn: canvas.width - 1,
@@ -448,6 +469,10 @@ watch(
   async (newFwd) => {
     if (unmounted) return
     direction.value = newFwd
+    if (shaderState) {
+      shaderState.gl.uniform1f(shaderState.directionLoc, directionUniformValue(direction.value))
+      renderShaderFrame()
+    }
   },
 )
 
