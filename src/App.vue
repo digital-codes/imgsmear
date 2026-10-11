@@ -3,10 +3,10 @@ import { ref } from 'vue'
 import ColorMix from './components/ColorMix.vue'
 import ImgSmear from './components/ImgSmear.vue'
 
-const type = ref(false)
-const isMode = ref<'cpu' | 'shader'>('cpu')
+const type = ref(true)
+const isMode = ref<'cpu' | 'shader'>('shader')
 const isFwd = ref(true)
-const isTgl = ref(false)
+const isTgl = ref(true)
 const container = ref<HTMLElement | null>(null)
 </script>
 
@@ -30,7 +30,7 @@ const container = ref<HTMLElement | null>(null)
     <ImgSmear
       v-if="type && container"
       :container="container"
-      img="/test.jpg"
+      img="/test2.jpg"
       :mode="isMode"
       :fwd="isFwd"
     />
