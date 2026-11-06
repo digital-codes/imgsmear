@@ -9,16 +9,22 @@ const props = withDefaults(
     img?: string
     /** Optional second image: when set the smear becomes a transition that
      * reveals imgB behind the sweeping front (A ahead, streak band mixing
-     * A -> B at the front, B behind). Same canvas size as img (stretched). */
+     * A -> B at the front, B behind). Same canvas size as img (stretched).
+     * Changing this prop reloads the images live. */
     imgB?: string
     mode?: RenderMode
     fwd?: boolean
     tgl?: boolean
+    /** Milliseconds between front steps. Lower = faster. Live-updatable
+     * (both renderers pick it up without a rebuild). */
     delayMs?: number
     // Width of the smear band per tick, in native image pixels. Default is
     // 1/120 of the image width, computed in onMounted. Override with an
     // explicit value if you want a fixed band size.
     stepColumns?: number
+    /** Transition band width as a fraction of the image width (0..1).
+     * Default 0.125 (1/8). Ignored in single-image mode. Live-updatable. */
+    band?: number
   }>(),
   {
     mode: 'cpu',
@@ -26,6 +32,7 @@ const props = withDefaults(
     tgl: true,
     delayMs: 30,
     stepColumns: 1,
+    band: 0.125,
   },
 )
 
@@ -46,6 +53,15 @@ interface CpuState {
 // scaled to the image width so the smear band is visually meaningful at
 // any resolution.
 let stepColumnsResolved = 1
+// Resolved transition band width in canvas px (from props.band as a width
+// fraction). Recomputed when the image or the band prop changes; both
+// renderers read it (CPU per tick, shader via a uniform).
+let bandResolved = 8
+
+function bandFromWidth(width: number): number {
+  const f = props.band && props.band > 0 ? props.band : 0.125
+  return Math.max(1, Math.round(width * f))
+}
 
 let cpuState: CpuState | null = null
 let cpuTimerId: number | null = null
@@ -212,8 +228,8 @@ const cpuTick = (): void => {
   const height = currentImageData.height
   const originalImageData = cpuState.originalImageData.data // read-only source
   const bData = cpuState.bImageData?.data ?? null
-  // smear band width in px for two-image mode (~1/8 of the image)
-  const band = Math.max(24, Math.round(width / 8))
+  // transition band width in px (shared with the shader mode)
+  const band = bandResolved
 
   for (let y = 0; y < height; y++) {
     const srcOffset = (y * width + indexColumn) * 4
@@ -427,7 +443,7 @@ function setupShader(
     if (!imageBLoc) return false
     gl.uniform1i(imageBLoc, 1)
     gl.uniform1f(hasBLoc, 1)
-    gl.uniform1f(bandLoc, Math.max(24, Math.round(canvas.width / 8)))
+    gl.uniform1f(bandLoc, bandResolved)
   } else {
     gl.uniform1f(hasBLoc, 0)
     gl.uniform1f(bandLoc, 0)
@@ -529,7 +545,7 @@ function setupRenderer(mode: RenderMode): void {
   console.log(`ImgSmear: mode=${mode} ${currentBitmap.width}x${currentBitmap.height} delayMs=${props.delayMs} stepColumns=${stepColumnsResolved} twoImage=${!!bitmapB}`)
 }
 
-onMounted(async () => {
+async function loadAndStart(): Promise<void> {
   if (!props.img || !props.container || !canvasEl.value) return
 
   const response = await fetch(props.img)
@@ -540,12 +556,12 @@ onMounted(async () => {
   const containerRect = props.container.getBoundingClientRect()
   const containerMaxDim = Math.max(containerRect.width, containerRect.height)
   const bitmapMaxDim = Math.max(bitmap.width, bitmap.height)
-  
+
   if (containerMaxDim > 0 && bitmapMaxDim > containerMaxDim) {
     const scale = containerMaxDim / bitmapMaxDim
     const scaledWidth = Math.round(bitmap.width * scale)
     const scaledHeight = Math.round(bitmap.height * scale)
-    
+
     const offCanvas = new OffscreenCanvas(scaledWidth, scaledHeight)
     const ctx = offCanvas.getContext('2d')
     if (ctx) {
@@ -554,14 +570,19 @@ onMounted(async () => {
     }
   }
 
+  if (currentBitmap) currentBitmap.close()
   currentBitmap = bitmap
 
   // Optional transition target image, stretched into A's geometry.
+  if (bitmapB) {
+    bitmapB.close()
+    bitmapB = null
+  }
   if (props.imgB) {
     try {
       const respB = await fetch(props.imgB)
       const blobB = await respB.blob()
-      let rawB = await createImageBitmap(blobB)
+      const rawB = await createImageBitmap(blobB)
       const offB = new OffscreenCanvas(bitmap.width, bitmap.height)
       const octx = offB.getContext('2d')
       if (octx) {
@@ -582,8 +603,12 @@ onMounted(async () => {
     ? props.stepColumns
     : Math.max(1, Math.round(bitmap.width / 120))
 
+  bandResolved = bandFromWidth(bitmap.width)
+
   setupRenderer((props.mode ?? 'cpu') as RenderMode)
-})
+}
+
+onMounted(loadAndStart)
 
 // React to prop changes. We bump canvasEpoch to force a fresh canvas DOM
 // element, then wait for Vue to swap it in before (re)building the
@@ -617,6 +642,44 @@ watch(
     if (unmounted) return
     directionToggle.value = newTgl
   }
+)
+
+// Switching images reloads the bitmaps and rebuilds the renderer on the
+// fresh canvas (no remount needed).
+watch(
+  () => [props.img, props.imgB] as const,
+  async () => {
+    if (unmounted) return
+    canvasEpoch.value++
+    await nextTick()
+    await loadAndStart()
+  },
+)
+
+// Band width is a uniform in the shader and read per tick by the CPU
+// renderer -- update live, no rebuild.
+watch(
+  () => props.band,
+  () => {
+    if (unmounted || !currentBitmap) return
+    bandResolved = bandFromWidth(currentBitmap.width)
+    if (shaderState) {
+      shaderState.gl.uniform1f(shaderState.bandLoc, bandResolved)
+      renderShaderFrame()
+    }
+  },
+)
+
+// The CPU renderer starts a setInterval with the initial delayMs; restart
+// it so speed changes apply live (the shader reads props.delayMs each
+// frame and picks changes up on its own).
+watch(
+  () => props.delayMs,
+  () => {
+    if (unmounted || cpuTimerId === null) return
+    window.clearInterval(cpuTimerId)
+    cpuTimerId = window.setInterval(cpuTick, props.delayMs)
+  },
 )
 
 onUnmounted(() => {
