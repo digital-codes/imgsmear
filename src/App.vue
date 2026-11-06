@@ -7,6 +7,7 @@ const type = ref(true)
 const isMode = ref<'cpu' | 'shader'>('shader')
 const isFwd = ref(true)
 const isTgl = ref(true)
+const two = ref(false)
 const container = ref<HTMLElement | null>(null)
 </script>
 
@@ -22,15 +23,20 @@ const container = ref<HTMLElement | null>(null)
     <button v-if="type" @click="isTgl = !isTgl">
       {{ isTgl ? 'TGL ON' : 'TGL OFF' }}
     </button>
+    <button v-if="type" @click="two = !two">
+      {{ two ? 'A→B' : '1 IMG' }}
+    </button>
     </div>
     <div class="status">
-    <p>Selected: {{ type ? `IS (${isMode})` : 'CM' }}, Direction: {{ isFwd ? 'FWD' : 'BWD' }}, {{ isTgl ? 'TGL ON' : 'TGL OFF' }}</p>
+    <p>Selected: {{ type ? `IS (${isMode})` : 'CM' }}, Direction: {{ isFwd ? 'FWD' : 'BWD' }}, {{ isTgl ? 'TGL ON' : 'TGL OFF' }}{{ type ? (two ? ', transition: summer → snow (2021 weekly photos)' : ', single image') : '' }}</p>
   </div>
   <div ref="container" class="CC">
     <ImgSmear
       v-if="type && container"
+      :key="two ? 'two' : 'one'"
       :container="container"
-      img="/test2.jpg"
+      :img="two ? '/photoA.jpg' : '/test2.jpg'"
+      :img-b="two ? '/photoB.jpg' : undefined"
       :mode="isMode"
       :fwd="isFwd"
     />

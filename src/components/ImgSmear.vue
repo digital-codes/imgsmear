@@ -7,6 +7,10 @@ const props = withDefaults(
   defineProps<{
     container?: HTMLElement
     img?: string
+    /** Optional second image: when set the smear becomes a transition that
+     * reveals imgB behind the sweeping front (A ahead, streak band mixing
+     * A -> B at the front, B behind). Same canvas size as img (stretched). */
+    imgB?: string
     mode?: RenderMode
     fwd?: boolean
     tgl?: boolean
@@ -35,6 +39,7 @@ interface CpuState {
   ctx: CanvasRenderingContext2D
   originalImageData: ImageData
   currentImageData: ImageData
+  bImageData: ImageData | null
   indexColumn: number
 }
 // Resolved step size (native pixels). If the prop is 0 we pick a value
@@ -50,9 +55,12 @@ interface ShaderState {
   gl: WebGLRenderingContext
   program: WebGLProgram
   texture: WebGLTexture
+  textureB: WebGLTexture | null
   buffer: WebGLBuffer
   indexColumnLoc: WebGLUniformLocation | null
   directionLoc: WebGLUniformLocation | null
+  hasBLoc: WebGLUniformLocation | null
+  bandLoc: WebGLUniformLocation | null
   width: number
   height: number
   indexColumn: number
@@ -79,12 +87,17 @@ void main() {
 }
 `
 
-// The smear is a per-fragment decision: if the fragment's pixel x is at or
-// to the right of the index column, replace it with the colour of the
-// index column on the same row. Everything to the left keeps the original
-// texture sample. Because the texture holds the pristine image, no reset
-// pass is needed when the index wraps -- we just snap indexColumn back to
-// width - 1 on the next tick and the shader instantly redraws the original.
+// The smear is a per-fragment decision. Single-image mode (u_hasB = 0):
+// pixels on the smeared side of the index column take the colour of the
+// index column on their row; the rest keeps the original texture. Because
+// the texture holds the pristine image, no reset pass is needed when the
+// index wraps -- we just snap indexColumn back to width - 1 on the next
+// tick and the shader instantly redraws the original.
+//
+// Two-image mode (u_hasB = 1): the smear becomes a transition. Ahead of the
+// front: image A untouched. At the front: a streak band of width u_band that
+// mixes A's front-column colour into B's front-column colour. Behind the
+// front: image B revealed.
 const FRAGMENT_SHADER_SRC = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -92,9 +105,12 @@ precision highp float;
 precision mediump float;
 #endif
 uniform sampler2D u_image;
+uniform sampler2D u_imageB;
 uniform float u_indexColumn;
 uniform float u_width;
 uniform float u_direction;
+uniform float u_hasB;
+uniform float u_band;
 varying vec2 v_uv;
 
 void main() {
@@ -104,7 +120,7 @@ void main() {
   float px = uv.x * u_width;
   float u = (u_indexColumn + 0.5) / u_width;
   bool shouldSmear = false;
-  
+
   if (u_direction > 0.5) {
     // Forward direction: smear from left to index column
     shouldSmear = px < u_indexColumn;
@@ -112,8 +128,22 @@ void main() {
     // Backward direction: smear from index column to right
     shouldSmear = px > u_indexColumn;
   }
-  
-  if (shouldSmear) {
+
+  if (shouldSmear && u_hasB > 0.5) {
+    // Transition: A ahead of the front, streak band at the front mixing
+    // A -> B, B revealed behind it.
+    float dist = abs(px - u_indexColumn);
+    if (dist > u_band) {
+      gl_FragColor = texture2D(u_imageB, uv);
+    } else {
+      float t = clamp(dist / max(u_band, 1.0), 0.0, 1.0);
+      vec3 ca = texture2D(u_image, vec2(u, uv.y)).rgb;
+      vec3 cb = texture2D(u_imageB, vec2(u, uv.y)).rgb;
+      // t = 0 at the front (adjacent to the unsmeared A region) -> A colour;
+      // t = 1 at the band's outer edge (adjacent to the revealed B) -> B
+      gl_FragColor = vec4(mix(ca, cb, t), 1.0);
+    }
+  } else if (shouldSmear) {
     // Sample the index column for this row. +0.5 lands on the pixel
     // centre when using nearest/linear filtering.
     gl_FragColor = texture2D(u_image, vec2(u, uv.y));
@@ -180,13 +210,10 @@ const cpuTick = (): void => {
   const data = currentImageData.data
   const width = currentImageData.width
   const height = currentImageData.height
-
-  const originalImageData = new ImageData(
-      new Uint8ClampedArray(cpuState.originalImageData.data),
-      width,
-      height
-    ).data
-
+  const originalImageData = cpuState.originalImageData.data // read-only source
+  const bData = cpuState.bImageData?.data ?? null
+  // smear band width in px for two-image mode (~1/8 of the image)
+  const band = Math.max(24, Math.round(width / 8))
 
   for (let y = 0; y < height; y++) {
     const srcOffset = (y * width + indexColumn) * 4
@@ -198,18 +225,52 @@ const cpuTick = (): void => {
     if (!direction.value) {
       for (let x = 0; x < indexColumn; x++) {
         const offset = (y * width + x) * 4
-        data[offset]     = r
-        data[offset + 1] = g
-        data[offset + 2] = b
-        data[offset + 3] = a
+        if (bData) {
+          const dist = indexColumn - x
+          if (dist > band) {
+            // B revealed
+            data[offset] = bData[offset]
+            data[offset + 1] = bData[offset + 1]
+            data[offset + 2] = bData[offset + 2]
+            data[offset + 3] = bData[offset + 3]
+          } else {
+            // streak band mixing A front column -> B
+            const t = dist / band // 0 at front -> 1 at band edge
+            data[offset] = bData[offset] * t + r * (1 - t)
+            data[offset + 1] = bData[offset + 1] * t + g * (1 - t)
+            data[offset + 2] = bData[offset + 2] * t + b * (1 - t)
+            data[offset + 3] = a
+          }
+        } else {
+          data[offset] = r
+          data[offset + 1] = g
+          data[offset + 2] = b
+          data[offset + 3] = a
+        }
       }
     } else {
       for (let x = indexColumn; x < width; x++) {
         const offset = (y * width + x) * 4
-        data[offset]     = r
-        data[offset + 1] = g
-        data[offset + 2] = b
-        data[offset + 3] = a
+        if (bData) {
+          const dist = x - indexColumn
+          if (dist > band) {
+            data[offset] = bData[offset]
+            data[offset + 1] = bData[offset + 1]
+            data[offset + 2] = bData[offset + 2]
+            data[offset + 3] = bData[offset + 3]
+          } else {
+            const t = dist / band
+            data[offset] = bData[offset] * t + r * (1 - t)
+            data[offset + 1] = bData[offset + 1] * t + g * (1 - t)
+            data[offset + 2] = bData[offset + 2] * t + b * (1 - t)
+            data[offset + 3] = a
+          }
+        } else {
+          data[offset] = r
+          data[offset + 1] = g
+          data[offset + 2] = b
+          data[offset + 3] = a
+        }
       }
     }
   }
@@ -218,7 +279,6 @@ const cpuTick = (): void => {
 
   const wrapped = advanceIndex(cpuState, stepColumnsResolved)
   if (wrapped) {
-    console.log("wrapping", cpuState, direction.value, directionToggle.value)
     if (directionToggle.value) {
       direction.value = !direction.value
     }
@@ -262,7 +322,7 @@ const shaderRender = (time: number): void => {
   shaderState.rafId = requestAnimationFrame(shaderRender)
 }
 
-function setupCpu(canvas: HTMLCanvasElement, bitmap: ImageBitmap): void {
+function setupCpu(canvas: HTMLCanvasElement, bitmap: ImageBitmap, bitmapB: ImageBitmap | null): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 
@@ -274,16 +334,29 @@ function setupCpu(canvas: HTMLCanvasElement, bitmap: ImageBitmap): void {
     originalImageData.height
   )
 
+  let bImageData: ImageData | null = null
+  if (bitmapB) {
+    // B stretched into A's canvas geometry (same-spot photos share aspect)
+    ctx.drawImage(bitmapB, 0, 0, canvas.width, canvas.height)
+    bImageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(bitmap, 0, 0)
+  }
+
   cpuState = {
     ctx,
     originalImageData,
     currentImageData,
+    bImageData,
     indexColumn: canvas.width - 1
   }
   cpuTimerId = window.setInterval(cpuTick, props.delayMs)
 }
 
-function setupShader(canvas: HTMLCanvasElement, bitmap: ImageBitmap): boolean {
+function setupShader(
+  canvas: HTMLCanvasElement,
+  bitmap: ImageBitmap,
+  bitmapB: ImageBitmap | null,
+): boolean {
   const gl = canvas.getContext('webgl')
   if (!gl) {
     console.warn('ImgSmear: WebGL unavailable, shader mode requested')
@@ -329,20 +402,47 @@ function setupShader(canvas: HTMLCanvasElement, bitmap: ImageBitmap): boolean {
   const indexColumnLoc = gl.getUniformLocation(program, 'u_indexColumn')
   const widthLoc = gl.getUniformLocation(program, 'u_width')
   const directionLoc = gl.getUniformLocation(program, 'u_direction')
-  if (!imageLoc || !indexColumnLoc || !widthLoc || !directionLoc) return false
+  const hasBLoc = gl.getUniformLocation(program, 'u_hasB')
+  const bandLoc = gl.getUniformLocation(program, 'u_band')
+  if (!imageLoc || !indexColumnLoc || !widthLoc || !directionLoc || !hasBLoc || !bandLoc) return false
 
   gl.uniform1i(imageLoc, 0)
   gl.uniform1f(widthLoc, canvas.width)
   gl.uniform1f(indexColumnLoc, canvas.width - 1)
   gl.uniform1f(directionLoc, directionUniformValue(direction.value))
 
+  // Optional second texture for the transition mode.
+  let textureB: WebGLTexture | null = null
+  if (bitmapB) {
+    textureB = gl.createTexture()
+    if (!textureB) return false
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, textureB)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmapB)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    const imageBLoc = gl.getUniformLocation(program, 'u_imageB')
+    if (!imageBLoc) return false
+    gl.uniform1i(imageBLoc, 1)
+    gl.uniform1f(hasBLoc, 1)
+    gl.uniform1f(bandLoc, Math.max(24, Math.round(canvas.width / 8)))
+  } else {
+    gl.uniform1f(hasBLoc, 0)
+    gl.uniform1f(bandLoc, 0)
+  }
+
   shaderState = {
     gl,
     program,
     texture,
+    textureB,
     buffer,
     indexColumnLoc,
     directionLoc,
+    hasBLoc,
+    bandLoc,
     width: canvas.width,
     height: canvas.height,
     indexColumn: canvas.width - 1,
@@ -360,9 +460,10 @@ function setupShader(canvas: HTMLCanvasElement, bitmap: ImageBitmap): boolean {
 }
 
 // ---------- Lifecycle ----------
-// Module-level bitmap so the watcher-driven rebuild can re-use the
+// Module-level bitmaps so the watcher-driven rebuild can re-use the
 // already-loaded pixels instead of re-fetching.
 let currentBitmap: ImageBitmap | null = null
+let bitmapB: ImageBitmap | null = null
 let unmounted = false
 // A counter that, when changed, forces Vue to destroy and re-create the
 // <canvas> DOM element. We bump it whenever the mode changes so each
@@ -417,15 +518,15 @@ function setupRenderer(mode: RenderMode): void {
   sizeCanvas(canvas, currentBitmap)
 
   if (mode === 'shader') {
-    const ok = setupShader(canvas, currentBitmap)
+    const ok = setupShader(canvas, currentBitmap, bitmapB)
     if (!ok) {
       console.warn('ImgSmear: shader setup failed, falling back to CPU mode')
-      setupCpu(canvas, currentBitmap)
+      setupCpu(canvas, currentBitmap, bitmapB)
     }
   } else {
-    setupCpu(canvas, currentBitmap)
+    setupCpu(canvas, currentBitmap, bitmapB)
   }
-  console.log(`ImgSmear: mode=${mode} ${currentBitmap.width}x${currentBitmap.height} delayMs=${props.delayMs} stepColumns=${stepColumnsResolved}`)
+  console.log(`ImgSmear: mode=${mode} ${currentBitmap.width}x${currentBitmap.height} delayMs=${props.delayMs} stepColumns=${stepColumnsResolved} twoImage=${!!bitmapB}`)
 }
 
 onMounted(async () => {
@@ -454,6 +555,25 @@ onMounted(async () => {
   }
 
   currentBitmap = bitmap
+
+  // Optional transition target image, stretched into A's geometry.
+  if (props.imgB) {
+    try {
+      const respB = await fetch(props.imgB)
+      const blobB = await respB.blob()
+      let rawB = await createImageBitmap(blobB)
+      const offB = new OffscreenCanvas(bitmap.width, bitmap.height)
+      const octx = offB.getContext('2d')
+      if (octx) {
+        octx.drawImage(rawB, 0, 0, bitmap.width, bitmap.height)
+        bitmapB = await createImageBitmap(offB)
+      }
+      rawB.close()
+    } catch {
+      console.warn('ImgSmear: failed to load imgB, running single-image smear')
+      bitmapB = null
+    }
+  }
 
   // Pick a sensible step if the caller left it at 0. Target ~120 distinct
   // smear steps across the full image width -- yields a clearly visible
@@ -505,6 +625,10 @@ onUnmounted(() => {
   if (currentBitmap) {
     currentBitmap.close()
     currentBitmap = null
+  }
+  if (bitmapB) {
+    bitmapB.close()
+    bitmapB = null
   }
 })
 </script>
