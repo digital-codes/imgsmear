@@ -39,6 +39,10 @@ const props = withDefaults(
 const direction = ref(props.fwd)
 const directionToggle = ref(props.tgl)
 
+/** fired once per sweep wrap, in both renderers — the streak sequencer
+ *  advances to the next image pair on it */
+const emit = defineEmits<{ wrapped: [forward: boolean] }>()
+
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 
 // ---------- CPU state ----------
@@ -308,6 +312,7 @@ const cpuTick = (): void => {
       height
     )
     ctx.putImageData(cpuState.currentImageData, 0, 0)
+    emit('wrapped', direction.value)
   }
 }
 
@@ -326,8 +331,11 @@ const shaderRender = (time: number): void => {
   const elapsed = time - shaderState.lastTickTime
   if (elapsed >= props.delayMs) {
     const wrapped = advanceIndex(shaderState, stepColumnsResolved)
-    if (wrapped && directionToggle.value) {
-      direction.value = !direction.value
+    if (wrapped) {
+      if (directionToggle.value) {
+        direction.value = !direction.value
+      }
+      emit('wrapped', direction.value)
     }
     shaderState.gl.uniform1f(shaderState.indexColumnLoc, shaderState.indexColumn)
     shaderState.gl.uniform1f(shaderState.directionLoc, directionUniformValue(direction.value))
